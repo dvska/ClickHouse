@@ -64,14 +64,15 @@ void IMergedBlockOutputStream::addStreams(
             aio_threshold);
     };
 
-    type.enumerateStreams(callback, {});
+    IDataType::SubstreamPath stream_path;
+    type.enumerateStreams(callback, stream_path);
 }
 
 
 IDataType::OutputStreamGetter IMergedBlockOutputStream::createStreamGetter(
         const String & name, OffsetColumns & offset_columns, bool skip_offsets)
 {
-    return [&name, &offset_columns, skip_offsets] (const IDataType::SubstreamPath & substream_path) -> WriteBuffer *
+    return [&, skip_offsets] (const IDataType::SubstreamPath & substream_path) -> WriteBuffer *
     {
         bool is_offsets = !substream_path.empty() && substream_path.back().type == IDataType::Substream::ArraySizes;
         if (is_offsets && skip_offsets)
@@ -94,8 +95,12 @@ void IMergedBlockOutputStream::writeData(
     const IColumn & column,
     OffsetColumns & offset_columns,
     bool skip_offsets,
-    const IDataType::SerializeBinaryBulkStatePtr & serialization_state)
+    IDataType::SerializeBinaryBulkStatePtr & serialization_state)
 {
+    IDataType::SerializeBinaryBulkSettings settings;
+    settings.getter = createStreamGetter(name, offset_columns, skip_offsets);
+    settings.max_dictionary_size = 1024;
+
     size_t size = column.size();
     size_t prev_mark = 0;
     while (prev_mark < size)
@@ -116,9 +121,6 @@ void IMergedBlockOutputStream::writeData(
                 if (is_offsets && skip_offsets)
                     return;
 
-                if (!substream_path.empty() && substream_path.back().type == IDataType::Substream::DictionaryKeys)
-                    return;
-
                 String stream_name = IDataType::getFileNameForStream(name, substream_path);
 
                 /// Don't write offsets more than one time for Nested type.
@@ -133,12 +135,10 @@ void IMergedBlockOutputStream::writeData(
 
                 writeIntBinary(stream.plain_hashing.count(), stream.marks);
                 writeIntBinary(stream.compressed.offset(), stream.marks);
-            }, {});
+            }, settings.path);
         }
 
-        IDataType::OutputStreamGetter stream_getter = createStreamGetter(name, offset_columns, skip_offsets);
-
-        type.serializeBinaryBulkWithMultipleStreams(column, stream_getter, prev_mark, limit, true, {}, serialization_state);
+        type.serializeBinaryBulkWithMultipleStreams(column, prev_mark, limit, settings, serialization_state);
 
         /// So that instead of the marks pointing to the end of the compressed block, there were marks pointing to the beginning of the next one.
         type.enumerateStreams([&] (const IDataType::SubstreamPath & substream_path)
@@ -153,11 +153,8 @@ void IMergedBlockOutputStream::writeData(
             if (is_offsets && offset_columns.count(stream_name))
                 return;
 
-            if (!substream_path.empty() && substream_path.back().type == IDataType::Substream::DictionaryKeys)
-                return;
-
             column_streams[stream_name]->compressed.nextIfAtEnd();
-        }, {});
+        }, settings.path);
 
         prev_mark += limit;
     }
@@ -171,7 +168,7 @@ void IMergedBlockOutputStream::writeData(
             String stream_name = IDataType::getFileNameForStream(name, substream_path);
             offset_columns.insert(stream_name);
         }
-    }, {});
+    }, settings.path);
 }
 
 
@@ -299,9 +296,15 @@ void MergedBlockOutputStream::writeSuffixAndFinalizePart(
         MergeTreeData::DataPart::Checksums * additional_column_checksums)
 {
     /// Finish columns serialization.
+    IDataType::SerializeBinaryBulkSettings settings;
+    settings.max_dictionary_size = 1024;
+    OffsetColumns offset_columns;
     auto it = columns_list.begin();
     for (size_t i = 0; i < columns_list.size(); ++i, ++it)
-        it->type->serializeBinaryBulkStateSuffix(serialization_states[i]);
+    {
+        settings.getter = createStreamGetter(it->name, offset_columns, false);
+        it->type->serializeBinaryBulkStateSuffix(settings, serialization_states[i]);
+    }
 
     if (!total_column_list)
         total_column_list = &columns_list;
@@ -427,11 +430,13 @@ void MergedBlockOutputStream::writeImpl(const Block & block, const IColumn::Perm
     {
         serialization_states.reserve(columns_list.size());
         OffsetColumns tmp_offset_columns;
+        IDataType::SerializeBinaryBulkSettings settings;
 
         for (const auto & col : columns_list)
         {
-            auto getter = createStreamGetter(col.name, tmp_offset_columns, false);
-            serialization_states.emplace_back(col.type->serializeBinaryBulkStatePrefix(std::move(getter), {}));
+            settings.getter = createStreamGetter(col.name, tmp_offset_columns, false);
+            serialization_states.emplace_back(nullptr);
+            col.type->serializeBinaryBulkStatePrefix(settings, serialization_states.back());
         }
     }
 
@@ -515,15 +520,16 @@ void MergedColumnOnlyOutputStream::write(const Block & block)
         serialization_states.clear();
         serialization_states.reserve(block.columns());
         OffsetColumns tmp_offset_columns;
+        IDataType::SerializeBinaryBulkSettings settings;
 
         for (size_t i = 0; i < block.columns(); ++i)
         {
             const auto & col = block.safeGetByPosition(i);
 
             addStreams(part_path, col.name, *col.type, 0, skip_offsets);
-
-            auto getter = createStreamGetter(col.name, tmp_offset_columns, false);
-            serialization_states.emplace_back(col.type->serializeBinaryBulkStatePrefix(std::move(getter), {}));
+            serialization_states.emplace_back(nullptr);
+            settings.getter = createStreamGetter(col.name, tmp_offset_columns, false);
+            col.type->serializeBinaryBulkStatePrefix(settings, serialization_states.back());
         }
 
         initialized = true;
@@ -550,8 +556,15 @@ void MergedColumnOnlyOutputStream::writeSuffix()
 MergeTreeData::DataPart::Checksums MergedColumnOnlyOutputStream::writeSuffixAndGetChecksums()
 {
     /// Finish columns serialization.
+    IDataType::SerializeBinaryBulkSettings settings;
+    settings.max_dictionary_size = 1024;
+    OffsetColumns offset_columns;
     for (size_t i = 0; i < header.columns(); ++i)
-        header.safeGetByPosition(i).type->serializeBinaryBulkStateSuffix(serialization_states[i]);
+    {
+        auto & column = header.safeGetByPosition(i);
+        settings.getter = createStreamGetter(column.name, offset_columns, skip_offsets);
+        column.type->serializeBinaryBulkStateSuffix(settings, serialization_states[i]);
+    }
 
     MergeTreeData::DataPart::Checksums checksums;
 

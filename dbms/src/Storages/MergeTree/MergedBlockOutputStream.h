@@ -69,13 +69,9 @@ protected:
 
     IDataType::OutputStreamGetter createStreamGetter(const String & name, OffsetColumns & offset_columns, bool skip_offsets);
 
-    /// Start serialization for column.
-    SerializationState createSerializationState(const std::string & name, const IDataType & type,
-                                                OffsetColumns & offset_columns, bool skip_offsets);
-
     /// Write data of one column.
     void writeData(const String & name, const IDataType & type, const IColumn & column, OffsetColumns & offset_columns,
-                   bool skip_offsets, const IDataType::SerializeBinaryBulkStatePtr & serialization_state);
+                   bool skip_offsets, IDataType::SerializeBinaryBulkStatePtr & serialization_state);
 
     MergeTreeData & storage;
 

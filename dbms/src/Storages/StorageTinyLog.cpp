@@ -159,7 +159,7 @@ private:
 
     using WrittenStreams = std::set<std::string>;
 
-    IDataType::OutputStreamGetter createStreamGetter(const String & name, WrittenStreams & written_streams) const;
+    IDataType::OutputStreamGetter createStreamGetter(const String & name, WrittenStreams & written_streams);
     void writeData(const String & name, const IDataType & type, const IColumn & column, WrittenStreams & written_streams);
 };
 
@@ -215,7 +215,8 @@ Block TinyLogBlockInputStream::readImpl()
 
 void TinyLogBlockInputStream::readData(const String & name, const IDataType & type, IColumn & column, size_t limit)
 {
-    IDataType::InputStreamGetter stream_getter = [&] (const IDataType::SubstreamPath & path) -> ReadBuffer *
+    IDataType::DeserializeBinaryBulkSettings settings; /// TODO Use avg_value_size_hint.
+    settings.getter = [&] (const IDataType::SubstreamPath & path) -> ReadBuffer *
     {
         String stream_name = IDataType::getFileNameForStream(name, path);
 
@@ -226,14 +227,14 @@ void TinyLogBlockInputStream::readData(const String & name, const IDataType & ty
     };
 
     if (deserialize_states.count(name) == 0)
-        deserialize_states[name] = type.deserializeBinaryBulkStatePrefix(stream_getter, {});
+         type.deserializeBinaryBulkStatePrefix(settings, deserialize_states[name]);
 
-    type.deserializeBinaryBulkWithMultipleStreams(column, stream_getter, limit, 0, true, {}, deserialize_states[name]); /// TODO Use avg_value_size_hint.
+    type.deserializeBinaryBulkWithMultipleStreams(column, limit, settings, deserialize_states[name]);
 }
 
 
 IDataType::OutputStreamGetter TinyLogBlockOutputStream::createStreamGetter(const String & name,
-                                                                           WrittenStreams & written_streams) const
+                                                                           WrittenStreams & written_streams)
 {
     return [&] (const IDataType::SubstreamPath & path) -> WriteBuffer *
     {
@@ -253,12 +254,13 @@ IDataType::OutputStreamGetter TinyLogBlockOutputStream::createStreamGetter(const
 
 void TinyLogBlockOutputStream::writeData(const String & name, const IDataType & type, const IColumn & column, WrittenStreams & written_streams)
 {
-    IDataType::OutputStreamGetter stream_getter = createStreamGetter(name, written_streams);
+    IDataType::SerializeBinaryBulkSettings settings;
+    settings.getter = createStreamGetter(name, written_streams);
 
     if (serialize_states.count(name) == 0)
-        serialize_states[name] = type.serializeBinaryBulkStatePrefix(stream_getter, {});
+        type.serializeBinaryBulkStatePrefix(settings, serialize_states[name]);
 
-    type.serializeBinaryBulkWithMultipleStreams(column, stream_getter, 0, 0, true, {}, serialize_states[name]);
+    type.serializeBinaryBulkWithMultipleStreams(column, 0, 0, settings, serialize_states[name]);
 }
 
 
@@ -269,13 +271,14 @@ void TinyLogBlockOutputStream::writeSuffix()
     done = true;
 
     WrittenStreams written_streams;
+    IDataType::SerializeBinaryBulkSettings settings;
     for (const auto & column : getHeader())
     {
         auto it = serialize_states.find(column.name);
         if (it != serialize_states.end())
         {
-            auto getter = createStreamGetter(column.name, written_streams);
-            column.type->serializeBinaryBulkStateSuffix(it->second, getter, {}, true);
+            settings.getter = createStreamGetter(column.name, written_streams);
+            column.type->serializeBinaryBulkStateSuffix(settings, it->second);
         }
     }
 
@@ -354,7 +357,8 @@ void StorageTinyLog::addFiles(const String & column_name, const IDataType & type
         }
     };
 
-    type.enumerateStreams(stream_callback, {});
+    IDataType::SubstreamPath path;
+    type.enumerateStreams(stream_callback, path);
 }
 
 

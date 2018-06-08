@@ -353,7 +353,8 @@ void MergeTreeReader::addStreams(const String & name, const IDataType & type, co
             uncompressed_cache, aio_threshold, max_read_buffer_size, profile_callback, clock_type));
     };
 
-    type.enumerateStreams(callback, {});
+    IDataType::SubstreamPath path;
+    type.enumerateStreams(callback, path);
 }
 
 
@@ -385,13 +386,19 @@ void MergeTreeReader::readData(
         };
     };
 
-    if (deserialize_binary_bulk_state_map.count(name) == 0)
-        deserialize_binary_bulk_state_map[name] = type.createDeserializeBinaryBulkState(get_stream_getter(true), {});
-
     double & avg_value_size_hint = avg_value_size_hints[name];
+    IDataType::DeserializeBinaryBulkSettings settings;
+    settings.avg_value_size_hint = avg_value_size_hint;
+
+    if (deserialize_binary_bulk_state_map.count(name) == 0)
+    {
+        settings.getter = get_stream_getter(true);
+        type.deserializeBinaryBulkStatePrefix(settings, deserialize_binary_bulk_state_map[name]);
+    }
+
+    settings.getter = get_stream_getter(false);
     auto & deserialize_state = deserialize_binary_bulk_state_map[name];
-    type.deserializeBinaryBulkWithMultipleStreams(column, get_stream_getter(false), max_rows_to_read,
-                                                  avg_value_size_hint, true, {}, deserialize_state);
+    type.deserializeBinaryBulkWithMultipleStreams(column, max_rows_to_read, settings, deserialize_state);
     IDataType::updateAvgValueSizeHint(column, avg_value_size_hint);
 }
 
