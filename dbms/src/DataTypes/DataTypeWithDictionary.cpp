@@ -371,7 +371,7 @@ namespace
 
         for (auto & val : index)
             val = val < max_val ? hash_map[val]
-                                : hash_map_with_overflow[val] + hash_map.size();
+                                : val - max_val + hash_map.size();
 
         return index_map_col;
     }
