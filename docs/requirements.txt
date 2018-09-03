@@ -14,7 +14,7 @@ Markdown==2.6.11
 MarkupSafe==1.0
 mkdocs==0.17.2
 Pygments==2.2.0
-pytz==2017.3
+pytz==2018.5
 PyYAML==3.12
 recommonmark==0.4.0
 requests==2.18.4
